@@ -32,8 +32,10 @@ class GNNStack(torch.nn.Module):
             return pyg_nn.GCNConv
         elif model_type == 'GraphSage':
             return GraphSage
+            # return pyg_nn.SAGEConv
         elif model_type == 'GAT':
             return GAT
+            # return pyg_nn.GATConv
 
     def forward(self, data):
         x, edge_index, batch = data.x, data.edge_index, data.batch
@@ -46,7 +48,13 @@ class GNNStack(torch.nn.Module):
         # also find pyg_nn.global_max_pool useful for graph classification.
         # Our implementation is ~6 lines, but don't worry if you deviate from this.
 
-        x = None # TODO
+        for i in range(self.num_layers):
+          x = self.convs[i](x, edge_index)
+          x = F.relu(x)
+          x = F.dropout(x, p=self.dropout, training=self.training)
+        
+        if self.task == 'graph':
+          x = pyg_nn.global_max_pool(x, batch)
 
         ############################################################################
 
@@ -56,7 +64,6 @@ class GNNStack(torch.nn.Module):
 
     def loss(self, pred, label):
         return F.nll_loss(pred, label)
-
 
 class GraphSage(pyg_nn.MessagePassing):
     """Non-minibatch version of GraphSage."""
@@ -69,8 +76,8 @@ class GraphSage(pyg_nn.MessagePassing):
         # Define the layers needed for the forward function. 
         # Our implementation is ~2 lines, but don't worry if you deviate from this.
 
-        self.lin =  nn.Linear(in_channels, out_channels)
-        self.agg_lin = n.Linear(in_channels, out_channels)
+        self.lin = nn.Linear(in_channels, out_channels)
+        self.agg_lin = nn.Linear(in_channels, out_channels)
 
         ############################################################################
 
@@ -89,11 +96,11 @@ class GraphSage(pyg_nn.MessagePassing):
         # HINT: It may be useful to read the pyg_nn implementation of GCNConv,
         # https://pytorch-geometric.readthedocs.io/en/latest/notes/create_gnn.html
         # Our implementation is ~4 lines, but don't worry if you deviate from this.
-        
+        A = pyg_utils.to_dense_adj(edge_index, max_num_nodes=num_nodes).squeeze(0)
+        g = torch.matmul(A,x)
+        agg_x = self.agg_lin(g)
         x = self.lin(x)
-        A = pyg_utils.to_dense_adj(edge_index)
-        aggr_x = self.aggr_lin(torch.matmul(A,x))
-        out = aggr_x + x
+        out = agg_x + x 
 
         ############################################################################
 
@@ -122,6 +129,7 @@ class GraphSage(pyg_nn.MessagePassing):
         return aggr_out
 
 
+
 class GAT(pyg_nn.MessagePassing):
 
     def __init__(self, in_channels, out_channels, num_heads=1, concat=True,
@@ -140,7 +148,7 @@ class GAT(pyg_nn.MessagePassing):
         # Remember that the shape of the output depends the number of heads.
         # Our implementation is ~1 line, but don't worry if you deviate from this.
 
-        self.lin = nn.Linear(in_channels, self.heads*out_channels)
+        self.lin = nn.Linear(in_channels, self.heads * out_channels)
 
         ############################################################################
 
@@ -151,7 +159,7 @@ class GAT(pyg_nn.MessagePassing):
         # mechanism here. Remember to consider number of heads for dimension!
         # Our implementation is ~1 line, but don't worry if you deviate from this.
 
-        self.att = nn.Parameter(torch.Tensor(1, num_heads, out_channels*2))
+        self.att = nn.Parameter(torch.Tensor(self.heads, out_channels*2))
 
         ############################################################################
 
@@ -173,9 +181,10 @@ class GAT(pyg_nn.MessagePassing):
         # Apply your linear tra nsformation to the node feature matrix before starting
         # to propagate messages.
         # Our implementation is ~1 line, but don't worry if you deviate from this.
-        
-        x = self.lin(x)
-        
+
+        self.node_dim = 0
+        x = self.lin(x).view(-1, self.heads, self.out_channels)
+
         ############################################################################
 
         # Start propagating messages.
@@ -190,14 +199,12 @@ class GAT(pyg_nn.MessagePassing):
         # dimension!
         # Our implementation is ~5 lines, but don't worry if you deviate from this.
 
-        x_i = x_i.view(-1, self.heads, self.out_channels)
-        x_j = x_j.view(-1, self.heads, self.out_channels)
-        cat_x = torch.cat([x_i,x_j], dim=-1)
-        alpha = F.leaky_relu((cat_x*self.att).sum(dim=-1)
-        alpha = pyg_utils.softmax(alpha, edge_index_i, size_i)
+        cat_x = torch.cat([x_i, x_j], dim=-1)
+        alpha = F.leaky_relu((cat_x * self.att).sum(-1), negative_slope=0.2)
+        alpha = pyg_utils.softmax(alpha, index=edge_index_i, num_nodes=size_i)
 
         ############################################################################
-
+      
         alpha = F.dropout(alpha, p=self.dropout, training=self.training)
 
         return x_j * alpha.view(-1, self.heads, 1)

@@ -16,6 +16,7 @@ import torch_geometric.nn as pyg_nn
 import models
 import utils
 
+from torch.utils.tensorboard import SummaryWriter 
 
 def arg_parse():
     parser = argparse.ArgumentParser(description='GNN arguments.')
@@ -50,48 +51,54 @@ def arg_parse():
 
     return parser.parse_args()
 
-def train(dataset, task, args):
+def train(dataset, task, args, writer=None):
     if task == 'graph':
         # graph classification: separate dataloader for test set
         data_size = len(dataset)
         loader = DataLoader(
                 dataset[:int(data_size * 0.8)], batch_size=args.batch_size, shuffle=True)
-        print(len(loader))
         test_loader = DataLoader(
                 dataset[int(data_size * 0.8):], batch_size=args.batch_size, shuffle=True)
     elif task == 'node':
         # use mask to split train/validation/test
         test_loader = loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True)
-        print(len(loader.train_mask))
     else:
         raise RuntimeError('Unknown task')
 
-    # # build model
-    # model = models.GNNStack(dataset.num_node_features, args.hidden_dim, dataset.num_classes, 
-    #                         args, task=task)
-    # scheduler, opt = utils.build_optimizer(args, model.parameters())
+    # build model
+    model = models.GNNStack(dataset.num_node_features, args.hidden_dim, dataset.num_classes, 
+                            args, task=task)
 
-    # # train
-    # for epoch in range(args.epochs):
-    #     total_loss = 0
-    #     model.train()
-    #     for batch in loader:
-    #         opt.zero_grad()
-    #         pred = model(batch)
-    #         label = batch.y
-    #         if task == 'node':
-    #             pred = pred[batch.train_mask]
-    #             label = label[batch.train_mask]
-    #         loss = model.loss(pred, label)
-    #         loss.backward()
-    #         opt.step()
-    #         total_loss += loss.item() * batch.num_graphs
-    #     total_loss /= len(loader.dataset)
-    #     print(total_loss)
+    scheduler, opt = utils.build_optimizer(args, model.parameters())
 
-    #     if epoch % 10 == 0:
-    #         test_acc = test(loader, model)
-    #         print(test_acc,   '  test')
+    # train
+    for epoch in range(args.epochs):
+        total_loss = 0
+        model.train()
+        for batch in loader:
+            opt.zero_grad()
+            pred = model(batch)
+            label = batch.y
+            if task == 'node':
+                pred = pred[batch.train_mask]
+                label = label[batch.train_mask]
+            loss = model.loss(pred, label)
+            loss.backward()
+            opt.step()
+            total_loss += loss.item() * batch.num_graphs
+        total_loss /= len(loader.dataset)
+        writer.add_scalar(args.model_type + " Loss",
+                          loss, 
+                          epoch)
+        # print(total_loss)
+
+        if epoch % 10 == 0:
+            test_acc = test(loader, model)
+            writer.add_scalar(args.model_type + " Acc",
+                            test_acc,
+                            epoch)
+
+            # print(test_acc,   '  test')
 
 def test(loader, model, is_validation=False):
     model.eval()
@@ -128,7 +135,22 @@ def main():
     elif args.dataset == 'cora':
         dataset = Planetoid(root='/tmp/Cora', name='Cora')
         task = 'node'
-    train(dataset, task, args) 
+
+    writer = SummaryWriter('./test/' + args.dataset)
+
+    train(dataset, task, args, writer) 
+    print(args.dataset + " " + args.model_type)
+
+    print(" ")
+    args.model_type = "GraphSage"
+    train(dataset, task, args, writer) 
+    print(args.dataset + " " + args.model_type)
+
+    print(" ")
+    args.model_type = "GAT"
+    train(dataset, task, args, writer) 
+    print(args.dataset + " " + args.model_type)
+
 
 if __name__ == '__main__':
     main()
